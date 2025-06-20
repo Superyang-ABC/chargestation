@@ -1,0 +1,9 @@
+{
+    "price_list": [
+        {"start": "00:00", "end": "07:00", "price": 0.5, "service_fee": 0.1},
+        {"start": "07:00", "end": "19:00", "price": 0.8, "service_fee": 0.1},
+        {"start": "19:00", "end": "23:00", "price": 1.0, "service_fee": 0.1}
+    ],
+    "other_price": 0.6,
+    "other_service_fee": 0.1
+}

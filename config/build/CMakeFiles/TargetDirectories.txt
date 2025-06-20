@@ -1,0 +1,3 @@
+/home/yangxingyou/workspace/06_mylib/chargedevice/config/build/CMakeFiles/price_table_test.dir
+/home/yangxingyou/workspace/06_mylib/chargedevice/config/build/CMakeFiles/edit_cache.dir
+/home/yangxingyou/workspace/06_mylib/chargedevice/config/build/CMakeFiles/rebuild_cache.dir
