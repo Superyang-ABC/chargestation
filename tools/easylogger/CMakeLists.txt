@@ -1,6 +1,6 @@
 file(GLOB EASYLOGGER_SRC
     ${CMAKE_CURRENT_SOURCE_DIR}/easylogger/src/*.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/easylogger/port/*.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/demo/os/linux/easylogger/port/*.c
 )
 
 add_library(easylogger STATIC

@@ -4,28 +4,7 @@
 #include <thread>
 #include <chrono>
 
-void init_log_system() {
-    /* close printf buffer */
-    setbuf(stdout, NULL);
-    /* initialize EasyLogger */
-    elog_init();
-    /* set EasyLogger log format */
-    elog_set_fmt(ELOG_LVL_ASSERT, ELOG_FMT_ALL);
-    elog_set_fmt(ELOG_LVL_ERROR, ELOG_FMT_LVL | ELOG_FMT_TAG | ELOG_FMT_TIME);
-    elog_set_fmt(ELOG_LVL_WARN, ELOG_FMT_LVL | ELOG_FMT_TAG | ELOG_FMT_TIME);
-    elog_set_fmt(ELOG_LVL_INFO, ELOG_FMT_LVL | ELOG_FMT_TAG | ELOG_FMT_TIME);
-    elog_set_fmt(ELOG_LVL_DEBUG, ELOG_FMT_ALL & ~ELOG_FMT_FUNC);
-    elog_set_fmt(ELOG_LVL_VERBOSE, ELOG_FMT_ALL & ~ELOG_FMT_FUNC);
-#ifdef ELOG_COLOR_ENABLE
-    elog_set_text_color_enabled(true);
-#endif
-    /* start EasyLogger */
-    elog_start();
-    test_elog();
-    log_i("EasyLogger 启动成功！");
-    log_w("这是一个警告日志");
-    log_e("这是一个错误日志");
-}
+#include "unistd.h"
 
 void test_elog(void) {
     uint8_t buf[256]= {0};
@@ -49,11 +28,36 @@ void test_elog(void) {
     }
 }
 
+void init_log_system() {
+    /* close printf buffer */
+    setbuf(stdout, NULL);
+    /* initialize EasyLogger */
+    elog_init();
+    /* set EasyLogger log format */
+    elog_set_fmt(ELOG_LVL_ASSERT, ELOG_FMT_ALL);
+    elog_set_fmt(ELOG_LVL_ERROR, ELOG_FMT_LVL | ELOG_FMT_TAG | ELOG_FMT_TIME);
+    elog_set_fmt(ELOG_LVL_WARN, ELOG_FMT_LVL | ELOG_FMT_TAG | ELOG_FMT_TIME);
+    elog_set_fmt(ELOG_LVL_INFO, ELOG_FMT_LVL | ELOG_FMT_TAG | ELOG_FMT_TIME);
+    elog_set_fmt(ELOG_LVL_DEBUG, ELOG_FMT_ALL & ~ELOG_FMT_FUNC);
+    elog_set_fmt(ELOG_LVL_VERBOSE, ELOG_FMT_ALL & ~ELOG_FMT_FUNC);
+#ifdef ELOG_COLOR_ENABLE
+    elog_set_text_color_enabled(true);
+#endif
+    /* start EasyLogger */
+    elog_start();
+    test_elog();
+    log_i("EasyLogger 启动成功！");
+    log_w("这是一个警告日志");
+    log_e("这是一个错误日志");
+}
+
+
+
 int main() {
     // 初始化EasyLogger
     init_log_system();
     
-    log_a("MQTT客户端带日志测试程序");
+    //log_a("MQTT客户端带日志测试程序");
     log_i("==================");
     
     // 创建MQTT客户端

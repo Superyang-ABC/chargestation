@@ -62,20 +62,18 @@ add_executable(debug_mqtt_test
 
 # 创建带日志的测试程序
 add_executable(logged_test
-    simple_test.cpp
+    logged_test.cpp
     tools/mqtt/mqtt_client_v2.cpp
 )
 
-# # 创建充电桩程序
-# add_executable(charging_station
-#     charging_station.cpp
-#     tools/mqtt/mqtt_client_v2.cpp
-#     device/device.cpp
-#     config/price_table.cpp
-#     external/EasyLogger/demo/os/linux/easylogger/port/elog_port.c
-# )
-# # 添加 EasyLogger 源码
-# add_subdirectory(external/EasyLogger)
+# 创建充电桩程序
+add_executable(charging_station
+    charging_station.cpp
+    tools/mqtt/mqtt_client_v2.cpp
+    device/device.cpp
+    config/price_table.cpp
+)
+
 
 
 # 设置目标属性
@@ -104,13 +102,15 @@ target_include_directories(logged_test PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/tools/easylogger/easylogger/inc
 )
 
-# target_include_directories(charging_station PRIVATE 
-#     ${CMAKE_CURRENT_SOURCE_DIR}
-#     ${CMAKE_CURRENT_SOURCE_DIR}/tools/mqtt
-#     ${CMAKE_CURRENT_SOURCE_DIR}/external/nlohmann_json/include
-#     ${CMAKE_CURRENT_SOURCE_DIR}/device
-#     ${CMAKE_CURRENT_SOURCE_DIR}/config
-# )
+target_include_directories(charging_station PRIVATE 
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/tools/mqtt
+    ${CMAKE_CURRENT_SOURCE_DIR}/tools/nlohmann_json/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/tools/easylogger/easylogger/inc
+    ${CMAKE_CURRENT_SOURCE_DIR}/device
+    ${CMAKE_CURRENT_SOURCE_DIR}/config
+    
+)
 
 
 # 在多线程环境下需要链接pthread
@@ -119,11 +119,11 @@ target_link_libraries(mqtt_example PRIVATE Threads::Threads ${MQTT_C_LIBRARY})
 target_link_libraries(simple_test PRIVATE Threads::Threads ${MQTT_C_LIBRARY})
 target_link_libraries(debug_mqtt_test PRIVATE Threads::Threads ${MQTT_C_LIBRARY})
 target_link_libraries(logged_test PRIVATE Threads::Threads ${MQTT_C_LIBRARY} easylogger)
-# target_link_libraries(charging_station PRIVATE Threads::Threads mqttc)
+target_link_libraries(charging_station PRIVATE Threads::Threads mqttc)
 # # 以 charging_station 为例，链接 EasyLogger
-# target_link_libraries(charging_station PRIVATE easylogger)
+target_link_libraries(charging_station PRIVATE easylogger)
 # 安装规则（可选）
-install(TARGETS mqtt_example simple_test debug_mqtt_test logged_test DESTINATION bin)
+install(TARGETS mqtt_example simple_test debug_mqtt_test logged_test charging_station DESTINATION bin)
 
 
 

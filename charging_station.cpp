@@ -11,7 +11,7 @@
 #define CMD_MSG "GreenEnergy/CMD/"
 #define STATUS_MSG "GreenEnergy/STATUS/"
 
-#define CONFIG_PATH "../config/electricity_price.json"
+#define CONFIG_PATH "../config/price.json"
 #define MQTT_SERVER "127.0.0.1"
 #define MQTT_PORT 1883
 
@@ -32,51 +32,15 @@ int get_device_status(uint64_t pos) {
     return DEVICE_STATUS & (0x1 << pos) ? 1 : 0;
 }
 void print_device_status() {
-    std::cout << "设备状态: " << DEVICE_STATUS << std::endl;
+
+    log_w("设备状态: %d",DEVICE_STATUS);
 }
 
 void init_price_table(PriceTable &table) {  
-    if (table.load_from_file(CONFIG_PATH)) {
-            // // 查询当前电价
-            // time_t now = time(nullptr);
-            // double price = table.get_price(now);
-            // std::cout << "当前电价为: " << price << std::endl;
 
-            // 获取所有区间
-            auto sections = table.get_all_sections();
-
-            if(sections.size() == 0) {
-                set_device_status(DEVICE_STATUS_ERROR_EMPTY_CONFIG);
-            }
-            std::cout << "电价表: " << std::endl;
-            for (const auto& sec : sections) {
-                std::cout << sec.start << " - " << sec.end << ": " << sec.price << std::endl;
-            }
-
-        } else {
-            std::cout << "配置文件读取失败！" << std::endl;
-            set_device_status(DEVICE_STATUS_ERROR_CONFIG);
-        }
-}
-void test_elog(void) {
-    uint8_t buf[256]= {0};
-    int i = 0;
-
-    for (i = 0; i < sizeof(buf); i++)
-    {
-        buf[i] = i;
-    }
-    {
-        /* test log output for all level */
-        log_a("Hello EasyLogger!");
-        log_e("Hello EasyLogger!");
-        log_w("Hello EasyLogger!");
-        log_i("Hello EasyLogger!");
-        log_d("Hello EasyLogger!");
-        log_v("Hello EasyLogger!");
-//        elog_raw("Hello EasyLogger!");
-        elog_hexdump("test", 16, buf, sizeof(buf));
-        sleep(5);
+    if (!table.load(CONFIG_PATH)) {
+        log_w("加载价格表失败！");
+        set_device_status(DEVICE_STATUS_ERROR_CONFIG);
     }
 }
 void init_log_system() {
@@ -96,11 +60,9 @@ void init_log_system() {
 #endif
     /* start EasyLogger */
     elog_start();
-    test_elog();
-    log_i("EasyLogger 启动成功！");
-    log_w("这是一个警告日志");
-    log_e("这是一个错误日志");
+    log_i("EasyLogger init success！");
 }
+
 // 全局变量用于信号处理
 static bool running = true;
 
@@ -125,10 +87,6 @@ int main() {
     //初始化日志系统
     init_log_system();
 
-    std::cout << "=== MQTT客户端V2示例程序 ===\n";
-    std::cout << "基于最新MQTT-C库的C++14封装\n\n";
-
-    
     
     // 创建MQTT客户端
     MQTTClientV2 client(MQTT_SERVER, MQTT_PORT);
@@ -175,11 +133,7 @@ int main() {
 
     client.set_message_callback([](const std::string& topic, const std::string& payload, 
                                   uint8_t qos, bool retain) {
-        std::cout << "📨 收到消息:\n";
-        std::cout << "   主题: " << topic << "\n";
-        std::cout << "   内容: " << payload << "\n";
-        std::cout << "   QoS: " << static_cast<int>(qos) << "\n";
-        std::cout << "   保留: " << (retain ? "是" : "否") << "\n\n";
+        log_i("receive:%s content:%s Qos:%d",topic.c_str(),payload.c_str(),static_cast<int>(qos));
     });
     
     // 启用自动重连
@@ -203,7 +157,7 @@ int main() {
     MQTTClientV2::SubscribeOptions sub_opts;
     sub_opts.qos = 1;
     
-    if (!client.subscribe("test/cpp14", sub_opts)) {
+    if (!client.subscribe("test/cpp14/heartbeat", sub_opts)) {
         std::cerr << "订阅失败: " << client.get_last_error() << "\n";
     }
     
@@ -222,7 +176,6 @@ int main() {
     } 
     
     // 主循环
-    std::cout << "\n进入主循环，按Ctrl+C退出...\n";
     int counter = 0;
     
     while (running) {
@@ -252,9 +205,8 @@ int main() {
     }
     
     // 清理
-    std::cout << "\n正在断开连接...\n";
+    log_w("\n正在断开连接...\n");
     client.disconnect();
-    
-    std::cout << "程序退出\n";
+    log_w("\程序退出...\n");
     return 0;
 } 
