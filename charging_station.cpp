@@ -3,83 +3,74 @@
 #include <chrono>
 #include <thread>
 #include <signal.h>
-#include <nlohmann/json.hpp>
+#include "nlohmann/json.hpp"
 #include "device/device.hpp"
 #include "config/price_table.hpp"
 #include "elog.h"
+using namespace std;
 
-#define CMD_MSG "GreenEnergy/CMD/"
-#define STATUS_MSG "GreenEnergy/STATUS/"
+#define CMD "GreenEnergy/CMD/"
+#define STATUS "GreenEnergy/STATUS/"
+#define HEARTBEAT "GreenEnergy/HEARTBEAT/"
+#define DEVICE_ID "0000-00001"
+
+#define MSG(msg) (string(msg) + DEVICE_ID)
 
 #define CONFIG_PATH "../config/price.json"
 #define MQTT_SERVER "127.0.0.1"
 #define MQTT_PORT 1883
 
+void send_heatbeat();
+void send_result(int cmd,int result,string describe);
 
 uint64_t DEVICE_STATUS= 0;
 enum DEVICE_STATUS_CODE{
     DEVICE_STATUS_ERROR_CONFIG = 0,
     DEVICE_STATUS_ERROR_EMPTY_CONFIG = 1,
+    DEVICE_STATUS_SELF_CHECK = 2,
+    DEVICE_STATUS_START = 3,
+    DEVICE_STATUS_STOP = 4,
+    DEVICE_STATUS_PAUSE = 5,
 };
 
-void set_device_status(uint64_t pos) {
-    DEVICE_STATUS = DEVICE_STATUS | 0x1 << pos;
-}
-void clear_device_status(uint64_t pos) {
-    DEVICE_STATUS = DEVICE_STATUS & ~(0x1 << pos);
-}
-int get_device_status(uint64_t pos) {
-    return DEVICE_STATUS & (0x1 << pos) ? 1 : 0;
-}
-void print_device_status() {
+enum DEVICE_CMD{
+    DEVICE_CMD_START = 1,
+    DEVICE_CMD_STOP = 2,
+    DEVICE_CMD_PAUSE = 3
+};
 
-    log_w("设备状态: %d",DEVICE_STATUS);
-}
+enum RESULT_CODE{
+    RESULT_FAIL = 0,
+    RESULT_OK = 1, 
+};
 
-void init_price_table(PriceTable &table) {  
-
-    if (!table.load(CONFIG_PATH)) {
-        log_w("加载价格表失败！");
-        set_device_status(DEVICE_STATUS_ERROR_CONFIG);
-    }
-}
-void init_log_system() {
-    /* close printf buffer */
-    setbuf(stdout, NULL);
-    /* initialize EasyLogger */
-    elog_init();
-    /* set EasyLogger log format */
-    elog_set_fmt(ELOG_LVL_ASSERT, ELOG_FMT_ALL);
-    elog_set_fmt(ELOG_LVL_ERROR, ELOG_FMT_LVL | ELOG_FMT_TAG | ELOG_FMT_TIME);
-    elog_set_fmt(ELOG_LVL_WARN, ELOG_FMT_LVL | ELOG_FMT_TAG | ELOG_FMT_TIME);
-    elog_set_fmt(ELOG_LVL_INFO, ELOG_FMT_LVL | ELOG_FMT_TAG | ELOG_FMT_TIME);
-    elog_set_fmt(ELOG_LVL_DEBUG, ELOG_FMT_ALL & ~ELOG_FMT_FUNC);
-    elog_set_fmt(ELOG_LVL_VERBOSE, ELOG_FMT_ALL & ~ELOG_FMT_FUNC);
-#ifdef ELOG_COLOR_ENABLE
-    elog_set_text_color_enabled(true);
-#endif
-    /* start EasyLogger */
-    elog_start();
-    log_i("EasyLogger init success！");
-}
-
+// 创建MQTT客户端
+MQTTClientV2 client(MQTT_SERVER, MQTT_PORT);
+DeviceBase *device =  new Device();
+PriceTable table;
 // 全局变量用于信号处理
 static bool running = true;
+
+void set_device_status(uint64_t pos) { DEVICE_STATUS = DEVICE_STATUS | 0x1 << pos;}
+void clear_device_status(uint64_t pos) {DEVICE_STATUS = DEVICE_STATUS & ~(0x1 << pos);}
+int get_device_status(uint64_t pos) {return DEVICE_STATUS & (0x1 << pos) ? 1 : 0;}
+void print_device_status() {log_w("设备状态: %d",DEVICE_STATUS);}
+void init_price_table(PriceTable &table);
+void init_log_system();
+void send_result(int cmd,int result,string describe = "" );
+
 
 // 信号处理函数
 void signal_handler(int signal) {
     std::cout << "\n收到信号 " << signal << "，正在退出...\n";
     running = false;
 }
+void msg_handle(const std::string& topic, const std::string& payload, uint8_t qos, bool retain);
 
 int main() {
     // 设置信号处理
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
-
-    DeviceBase *device =  new Device();
-    PriceTable table;
-    
 
     //初始化电价
     init_price_table(table);
@@ -88,8 +79,7 @@ int main() {
     init_log_system();
 
     
-    // 创建MQTT客户端
-    MQTTClientV2 client(MQTT_SERVER, MQTT_PORT);
+    
     
     // 设置连接选项
     MQTTClientV2::ConnectionOptions conn_opts;
@@ -131,10 +121,7 @@ int main() {
         }
     });
 
-    client.set_message_callback([](const std::string& topic, const std::string& payload, 
-                                  uint8_t qos, bool retain) {
-        log_i("receive:%s content:%s Qos:%d",topic.c_str(),payload.c_str(),static_cast<int>(qos));
-    });
+    client.set_message_callback(msg_handle);
     
     // 启用自动重连
     client.set_auto_reconnect(true, std::chrono::seconds(5), 10);
@@ -157,23 +144,24 @@ int main() {
     MQTTClientV2::SubscribeOptions sub_opts;
     sub_opts.qos = 1;
     
-    if (!client.subscribe("test/cpp14/heartbeat", sub_opts)) {
+    if (!client.subscribe(MSG(CMD), sub_opts)) {
+        std::cerr << "订阅失败: " << client.get_last_error() << "\n";
+    }
+
+    if (!client.subscribe(MSG(HEARTBEAT), sub_opts)) {
         std::cerr << "订阅失败: " << client.get_last_error() << "\n";
     }
     
     
+    std::vector<std::string> topics = client.get_subscribed_topics();
+    for(int i = 0;i < topics.size();i++){
+        std::cout << "订阅主题: " << topics[i] << "\n";
+    }
+    
     // 发布消息
-    std::cout << "\n正在发布消息...\n";
-    MQTTClientV2::PublishOptions pub_opts;
-    pub_opts.qos = 1;
-    pub_opts.retain = false;
+    
 
     
-    if (!client.publish("test/device/status", "{\"status\": \"online\", \"timestamp\": " + 
-                       std::to_string(std::chrono::duration_cast<std::chrono::seconds>(
-                           std::chrono::system_clock::now().time_since_epoch()).count()) + "}", pub_opts)) {
-        std::cerr << "发布失败: " << client.get_last_error() << "\n";
-    } 
     
     // 主循环
     int counter = 0;
@@ -187,11 +175,7 @@ int main() {
         
         // 每10秒发布一次心跳消息
         if (counter % 10 == 0) {
-            std::string heartbeat = "Heartbeat #" + std::to_string(counter / 10) + 
-                                  " at " + std::to_string(std::chrono::duration_cast<std::chrono::seconds>(
-                                      std::chrono::system_clock::now().time_since_epoch()).count());
-            
-            client.publish("test/cpp14/heartbeat", heartbeat, pub_opts);
+            send_heatbeat();
         }
         
         // 检查错误
@@ -210,3 +194,115 @@ int main() {
     log_w("\程序退出...\n");
     return 0;
 } 
+
+void send_heatbeat(){
+    MQTTClientV2::PublishOptions pub_opts;
+    pub_opts.qos = 1;
+    pub_opts.retain = false;
+    nlohmann::json content;
+    content["status"] = DEVICE_STATUS;
+    content["timestamp"] = std::chrono::duration_cast<std::chrono::seconds>(
+                                std::chrono::system_clock::now().time_since_epoch()).count();
+    content["device_id"] = DEVICE_ID;
+    content["describe"] = "heartbeat";
+    std::string heartbeat = content.dump();
+    
+    client.publish(MSG(HEARTBEAT), heartbeat, pub_opts);
+}
+
+void send_result(int cmd,int result,string describe ){
+
+    MQTTClientV2::PublishOptions pub_opts;
+    pub_opts.qos = 1;
+    pub_opts.retain = false;
+    nlohmann::json content;
+    content["cmd"] = cmd;
+    content["result"] = result;
+    content["timestamp"] = std::chrono::duration_cast<std::chrono::seconds>(
+                                std::chrono::system_clock::now().time_since_epoch()).count();
+    content["device_id"] = DEVICE_ID;
+    content["describe"] = describe;
+    client.publish(MSG(STATUS), content.dump(), pub_opts);
+    log_i("send:%s  content:%s",MSG(STATUS),content.dump());
+}
+
+
+void init_log_system() {
+    /* close printf buffer */
+    setbuf(stdout, NULL);
+    /* initialize EasyLogger */
+    elog_init();
+    /* set EasyLogger log format */
+    elog_set_fmt(ELOG_LVL_ASSERT, ELOG_FMT_ALL);
+    elog_set_fmt(ELOG_LVL_ERROR, ELOG_FMT_LVL | ELOG_FMT_TAG | ELOG_FMT_TIME);
+    elog_set_fmt(ELOG_LVL_WARN, ELOG_FMT_LVL | ELOG_FMT_TAG | ELOG_FMT_TIME);
+    elog_set_fmt(ELOG_LVL_INFO, ELOG_FMT_LVL | ELOG_FMT_TAG | ELOG_FMT_TIME);
+    elog_set_fmt(ELOG_LVL_DEBUG, ELOG_FMT_ALL & ~ELOG_FMT_FUNC);
+    elog_set_fmt(ELOG_LVL_VERBOSE, ELOG_FMT_ALL & ~ELOG_FMT_FUNC);
+#ifdef ELOG_COLOR_ENABLE
+    elog_set_text_color_enabled(true);
+#endif
+    /* start EasyLogger */
+    elog_start();
+    log_i("EasyLogger init success！");
+    log_i("device id: %s",DEVICE_ID);
+}
+
+
+void msg_handle(const std::string& topic, const std::string& payload, uint8_t qos, bool retain) {
+
+    log_i("receive:%s content:%s Qos:%d",topic.c_str(),payload.c_str(),static_cast<int>(qos));
+    try{
+        nlohmann::json content = nlohmann::json::parse(payload);
+        int cmd = content["cmd"];
+        std::string timestamp = content["timestamp"];
+        std::string device_id = content["device_id"];
+
+        if(device_id != DEVICE_ID){
+            log_e("device id not match: %s",device_id.c_str());
+
+            return;
+        }
+        if(topic == MSG(CMD)){
+            if(cmd == DEVICE_CMD_START){
+                log_i("start");
+                if(device->SelfCheck() == 0){
+                    device->Start();
+                    set_device_status(DEVICE_STATUS_START);
+                    clear_device_status(DEVICE_STATUS_STOP);
+                    clear_device_status(DEVICE_STATUS_PAUSE);
+                    send_result(cmd,RESULT_OK);
+                }else{
+                    log_e("self check failed");
+                    send_result(cmd,RESULT_FAIL,"self check failed");
+                }
+            }else if(cmd == DEVICE_CMD_STOP){
+                log_i("stop");
+                device->Stop();
+                set_device_status(DEVICE_STATUS_STOP);
+                clear_device_status(DEVICE_STATUS_START);
+                clear_device_status(DEVICE_STATUS_PAUSE);
+                send_result(cmd,RESULT_FAIL);
+            }else if(cmd == DEVICE_CMD_PAUSE){
+                log_i("pause");
+                device->Pause();
+                set_device_status(DEVICE_STATUS_PAUSE);
+                clear_device_status(DEVICE_STATUS_START);
+                clear_device_status(DEVICE_STATUS_STOP);
+                send_result(cmd,RESULT_FAIL);
+            }   
+        }
+
+    }catch(const std::exception& e){
+        log_e("json parse error: %s",e.what());
+        return;
+    }
+
+}
+
+void init_price_table(PriceTable &table){
+    if (!table.load(CONFIG_PATH)) {
+        log_w("加载价格表失败！");
+        set_device_status(DEVICE_STATUS_ERROR_CONFIG);
+    }
+}

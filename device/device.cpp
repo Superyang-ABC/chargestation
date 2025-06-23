@@ -21,7 +21,7 @@ bool Device::Pause()
 
 int Device::SelfCheck()
 {
-    return true;
+    return 0;
 }
 
 float Device::GetPower()

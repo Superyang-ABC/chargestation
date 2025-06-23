@@ -1,0 +1,29 @@
+{
+    "cmd":1,
+    "device_id:"0000-00001",
+    "timestamp":"20250620"
+}
+
+
+{
+    "cmd":1,
+    "reuslt":1,
+    "status":1,
+    "device_id:"0000-00001",
+    "timestamp":"20250620",
+    "describe":"",
+}
+
+{
+    "status":1,
+    "device_id:"0000-00001",
+    "timestamp":"20250620",
+    "describe":"heartbeat",
+}
+
+
+mosquitto_pub -h '127.0.0.1' -p 1883 -t  "GreenEnergy/CMD/0000-00001" -m '{
+  "cmd": 1,
+  "device_id": "0000-00001",
+  "timestamp": "20250620"
+}'
