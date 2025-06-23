@@ -20,6 +20,48 @@ using namespace std;
 #define MQTT_SERVER "127.0.0.1"
 #define MQTT_PORT 1883
 
+
+
+struct MQTT_MSG{
+    std::string topic;
+    nlohmann::json content;
+    uint8_t qos;
+    bool retain;
+
+    MQTT_MSG(){
+        this->topic = "";
+        this->content = nlohmann::json();
+        this->qos = 0;
+        this->retain = false;
+    }
+
+    MQTT_MSG(const MQTT_MSG& other){
+        this->topic = other.topic;
+        this->content = other.content;
+        this->qos = other.qos;
+        this->retain = other.retain;
+    }
+
+    MQTT_MSG(std::string topic,nlohmann::json content,uint8_t qos,bool retain){
+        this->topic = topic;
+        this->content = content;
+        this->qos = qos;
+        this->retain = retain;
+    }
+
+    MQTT_MSG &operator=(const MQTT_MSG &msg){
+        this->topic = msg.topic;
+        this->content = msg.content;
+        this->qos = msg.qos;
+        this->retain = msg.retain;
+        return *this;
+    }
+};
+
+static std::queue<MQTT_MSG> mqtt_msg_queue;
+static std::mutex mqtt_msg_queue_mutex;
+
+
 void send_heatbeat();
 void send_result(int cmd,int result,string describe);
 
@@ -59,6 +101,23 @@ void init_price_table(PriceTable &table);
 void init_log_system();
 void send_result(int cmd,int result,string describe = "" );
 
+void push_mqtt_msg(MQTT_MSG msg){
+    std::lock_guard<std::mutex> lock(mqtt_msg_queue_mutex);
+    mqtt_msg_queue.push(msg);
+}
+
+void send_mqtt_msg(){
+    std::lock_guard<std::mutex> lock(mqtt_msg_queue_mutex);
+    MQTT_MSG msg;
+    MQTTClientV2::PublishOptions pub_opts;
+    while(mqtt_msg_queue.size()){
+        msg = mqtt_msg_queue.front();
+        mqtt_msg_queue.pop();
+        pub_opts.qos = msg.qos;
+        pub_opts.retain = msg.retain;
+        client.publish(msg.topic,msg.content.dump(),pub_opts);
+    }
+}
 
 // 信号处理函数
 void signal_handler(int signal) {
@@ -172,6 +231,10 @@ int main() {
         
         // 网络同步
         client.sync();
+
+        // 序列化发送MQTT消息
+        send_mqtt_msg();
+
         
         // 每10秒发布一次心跳消息
         if (counter % 10 == 0) {
@@ -206,7 +269,7 @@ void send_heatbeat(){
     content["device_id"] = DEVICE_ID;
     content["describe"] = "heartbeat";
     std::string heartbeat = content.dump();
-    
+    //push_mqtt_msg(MQTT_MSG(MSG(HEARTBEAT), content, pub_opts.qos, pub_opts.retain));
     client.publish(MSG(HEARTBEAT), heartbeat, pub_opts);
 }
 
@@ -222,8 +285,9 @@ void send_result(int cmd,int result,string describe ){
                                 std::chrono::system_clock::now().time_since_epoch()).count();
     content["device_id"] = DEVICE_ID;
     content["describe"] = describe;
-    client.publish(MSG(STATUS), content.dump(), pub_opts);
-    log_i("send:%s  content:%s",MSG(STATUS),content.dump());
+    push_mqtt_msg(MQTT_MSG(MSG(STATUS), content, pub_opts.qos, pub_opts.retain));
+    //client.publish(MSG(STATUS), content.dump(), pub_opts);
+    log_i("send:%s  content:%s",string(MSG(STATUS)).c_str(),content.dump().c_str());
 }
 
 
