@@ -62,17 +62,22 @@ struct MQTT_MSG{
 enum DEVICE_STATUS_CODE{
     DEVICE_STATUS_ERROR_CONFIG = 0,
     DEVICE_STATUS_ERROR_EMPTY_CONFIG = 1,
-    DEVICE_STATUS_SELF_CHECK = 2,
+    DEVICE_STATUS_SELF_CHECK_FAIL = 2,
     DEVICE_STATUS_START = 3,
     DEVICE_STATUS_STOP = 4,
     DEVICE_STATUS_PAUSE = 5,
     DEVICE_STATUS_ONLINE = 6, //在线
+    DEVICE_STATUS_BUSY = 7, //忙碌
+    DEVICE_STATUS_FORRBIDDEN = 8, //禁止所有充电
+     DEVICE_STATUS_FORRBIDDEN_REMOTE = 9, //禁止远程充电
+    DEVICE_STATUS_FORRBIDDEN_COMMERCIAL = 10, //禁止商用充电
 };
 
 enum DEVICE_CMD{
-    DEVICE_CMD_START = 1,
-    DEVICE_CMD_STOP = 2,
-    DEVICE_CMD_PAUSE = 3
+    DEVICE_CMD_REMOTE_START = 1,
+    DEVICE_CMD_COMMERCIAL_START = 2,
+    DEVICE_CMD_STOP = 3,
+    DEVICE_CMD_PAUSE = 4
 };
 
 enum RESULT_CODE{
@@ -80,7 +85,22 @@ enum RESULT_CODE{
     RESULT_OK = 1, 
 };
 
+enum START_TYPE{
+    START_TYPE_NFC = 0, //正常NFC启动
+    START_TYPE_BLUETOOTH = 1, //正常蓝牙启动
+    START_TYPE_REMOTE = 2, //远程启动
+    START_TYPE_COMMERCIAL = 3, //商用启动
+};
 
+struct ChargeInfo{
+    int start_type; //启动类型
+    string describe; //描述
+    uint64_t start_time; //开始时间
+    uint64_t end_time; //结束时间
+    float total; //价格
+};
+
+static int current_start_type = -1; //当前启动类型
 static std::queue<MQTT_MSG> mqtt_msg_queue;
 static std::mutex mqtt_msg_queue_mutex;
 static std::mutex device_mutex;
@@ -118,11 +138,60 @@ void print_device_status() {
     }
 
 void send_result(int cmd,int result,string describe = "" );
-bool check_start_condition();
+bool check_start_condition(int type);
 void msg_handle(const std::string& topic, const std::string& payload, uint8_t qos, bool retain);
 
-bool check_start_condition(){
-    
+bool check_start_condition(int type){
+    bool result = false;
+
+    if(get_device_status(DEVICE_STATUS_FORRBIDDEN)){
+        log_e("设备禁止充电");
+        return result;
+    }
+    if(get_device_status(DEVICE_STATUS_BUSY)){
+        log_e("设备忙碌中");
+        return result;
+    }
+    // 设置设备状态为忙碌
+    set_device_status(DEVICE_STATUS_BUSY);
+    // 检查设备状态
+    switch(type){
+        case START_TYPE_NFC:
+        case START_TYPE_BLUETOOTH:
+            break;
+        case START_TYPE_REMOTE:
+            if(get_device_status(DEVICE_STATUS_FORRBIDDEN_REMOTE)){
+                log_e("设备禁止远程充电");
+                result = false;
+            }
+            break;
+        case START_TYPE_COMMERCIAL:
+            if(get_device_status(DEVICE_STATUS_FORRBIDDEN_COMMERCIAL)){
+                log_e("设备禁止商用充电");
+                result = false;
+            }
+            else if(get_device_status(DEVICE_STATUS_ERROR_CONFIG)){
+                log_e("设备配置错误，无法商用充电");
+                result = false;
+            }
+            break;
+        default:
+            log_e("未知启动类型");
+    }
+    if(!result){
+        clear_device_status(DEVICE_STATUS_BUSY);
+        return false;
+    }
+
+    if(!device->SelfCheck()){
+        log_e("设备自检失败");
+        clear_device_status(DEVICE_STATUS_BUSY);
+        set_device_status(DEVICE_STATUS_SELF_CHECK_FAIL);
+        return false;
+    }
+    current_start_type = type;
+    //自检成功
+    clear_device_status(DEVICE_STATUS_SELF_CHECK_FAIL);
     return true;
 }
 
@@ -300,38 +369,39 @@ void msg_handle(const std::string& topic, const std::string& payload, uint8_t qo
             return;
         }
         if(topic == MSG(CMD)){
-            if(cmd == DEVICE_CMD_START){
+            if(cmd == START_TYPE_REMOTE){
                 log_i("start");
-
-                if(!check_start_condition()){
+                if(!check_start_condition(START_TYPE_REMOTE)){
                     log_e("check_start_condition failed");
                     send_result(cmd,RESULT_FAIL,"self check failed");
                     return;
                 }
-                if(device->SelfCheck() == 0){
-                    device->Start();
-                    set_device_status(DEVICE_STATUS_START);
-                    clear_device_status(DEVICE_STATUS_STOP);
-                    clear_device_status(DEVICE_STATUS_PAUSE);
-                    send_result(cmd,RESULT_OK);
-                }else{
-                    log_e("self check failed");
+                
+            }
+            if(cmd == START_TYPE_COMMERCIAL){
+                log_i("start");
+                if(!check_start_condition(START_TYPE_COMMERCIAL)){
+                    log_e("check_start_condition failed");
                     send_result(cmd,RESULT_FAIL,"self check failed");
+                    return;
                 }
-            }else if(cmd == DEVICE_CMD_STOP){
+            }
+            else if(cmd == DEVICE_CMD_STOP){
                 log_i("stop");
-                device->Stop();
+               
                 set_device_status(DEVICE_STATUS_STOP);
                 clear_device_status(DEVICE_STATUS_START);
                 clear_device_status(DEVICE_STATUS_PAUSE);
-                send_result(cmd,RESULT_FAIL);
+                device->Stop();
+                send_result(cmd,RESULT_OK);
+
             }else if(cmd == DEVICE_CMD_PAUSE){
                 log_i("pause");
-                device->Pause();
                 set_device_status(DEVICE_STATUS_PAUSE);
                 clear_device_status(DEVICE_STATUS_START);
                 clear_device_status(DEVICE_STATUS_STOP);
-                send_result(cmd,RESULT_FAIL);
+                device->Pause();
+                send_result(cmd,RESULT_OK);
             }   
         }
 
@@ -392,3 +462,4 @@ bool init_network(MQTTClientV2 & client){
         return true;
 
     }
+
