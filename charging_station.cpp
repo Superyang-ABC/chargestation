@@ -58,14 +58,7 @@ struct MQTT_MSG{
     }
 };
 
-static std::queue<MQTT_MSG> mqtt_msg_queue;
-static std::mutex mqtt_msg_queue_mutex;
 
-
-void send_heatbeat();
-void send_result(int cmd,int result,string describe);
-
-uint64_t DEVICE_STATUS= 0;
 enum DEVICE_STATUS_CODE{
     DEVICE_STATUS_ERROR_CONFIG = 0,
     DEVICE_STATUS_ERROR_EMPTY_CONFIG = 1,
@@ -73,6 +66,7 @@ enum DEVICE_STATUS_CODE{
     DEVICE_STATUS_START = 3,
     DEVICE_STATUS_STOP = 4,
     DEVICE_STATUS_PAUSE = 5,
+    DEVICE_STATUS_ONLINE = 6, //在线
 };
 
 enum DEVICE_CMD{
@@ -86,6 +80,11 @@ enum RESULT_CODE{
     RESULT_OK = 1, 
 };
 
+
+static std::queue<MQTT_MSG> mqtt_msg_queue;
+static std::mutex mqtt_msg_queue_mutex;
+static std::mutex device_mutex;
+uint64_t DEVICE_STATUS= 0;
 // 创建MQTT客户端
 MQTTClientV2 client(MQTT_SERVER, MQTT_PORT);
 DeviceBase *device =  new Device();
@@ -93,13 +92,39 @@ PriceTable table;
 // 全局变量用于信号处理
 static bool running = true;
 
-void set_device_status(uint64_t pos) { DEVICE_STATUS = DEVICE_STATUS | 0x1 << pos;}
-void clear_device_status(uint64_t pos) {DEVICE_STATUS = DEVICE_STATUS & ~(0x1 << pos);}
-int get_device_status(uint64_t pos) {return DEVICE_STATUS & (0x1 << pos) ? 1 : 0;}
-void print_device_status() {log_w("设备状态: %d",DEVICE_STATUS);}
+
 void init_price_table(PriceTable &table);
 void init_log_system();
+bool init_network(MQTTClientV2 & client);
+
+
+void send_heatbeat();
+void send_result(int cmd,int result,string describe);
+
+void set_device_status(uint64_t pos) { 
+    std::lock_guard<std::mutex> lck(device_mutex); 
+    DEVICE_STATUS = DEVICE_STATUS | 0x1 << pos;
+    }
+void clear_device_status(uint64_t pos) {
+    std::lock_guard<std::mutex> lck(device_mutex); 
+    DEVICE_STATUS = DEVICE_STATUS & ~(0x1 << pos);
+    }
+int  get_device_status(uint64_t pos) {
+    std::lock_guard<std::mutex> lck(device_mutex); 
+    return DEVICE_STATUS & (0x1 << pos) ? 1 : 0;
+    }
+void print_device_status() {
+    log_w("设备状态: %d",DEVICE_STATUS);
+    }
+
 void send_result(int cmd,int result,string describe = "" );
+bool check_start_condition();
+void msg_handle(const std::string& topic, const std::string& payload, uint8_t qos, bool retain);
+
+bool check_start_condition(){
+    
+    return true;
+}
 
 void push_mqtt_msg(MQTT_MSG msg){
     std::lock_guard<std::mutex> lock(mqtt_msg_queue_mutex);
@@ -124,103 +149,45 @@ void signal_handler(int signal) {
     std::cout << "\n收到信号 " << signal << "，正在退出...\n";
     running = false;
 }
-void msg_handle(const std::string& topic, const std::string& payload, uint8_t qos, bool retain);
+
 
 int main() {
     // 设置信号处理
     signal(SIGINT, signal_handler);
     signal(SIGTERM, signal_handler);
 
-    //初始化电价
-    init_price_table(table);
-
     //初始化日志系统
     init_log_system();
 
-    
-    
-    
-    // 设置连接选项
-    MQTTClientV2::ConnectionOptions conn_opts;
-    conn_opts.client_id = "cpp14_client_" + std::to_string(getpid());
-    conn_opts.clean_session = true;
-    conn_opts.keep_alive = 60;
-    conn_opts.connect_timeout = 1;
-    
-    // 设置回调函数
-    client.set_connect_callback([](bool success, const std::string& reason) {
-        if (success) {
-            std::cout << "✓ 连接成功: " << reason << "\n";
-        } else {
-            std::cout << "✗ 连接失败: " << reason << "\n";
-        }
-    });
-    
-    client.set_disconnect_callback([](const std::string& reason) {
-        std::cout << "⚠ 连接断开: " << reason << "\n";
-    });
-    
-    client.set_error_callback([](const std::string& error) {
-        std::cout << "❌ 错误: " << error << "\n";
-    });
-    
-    client.set_subscribe_callback([](const std::string& topic, bool success, uint8_t qos) {
-        if (success) {
-            std::cout << "✓ 订阅成功: " << topic << " (QoS: " << static_cast<int>(qos) << ")\n";
-        } else {
-            std::cout << "✗ 订阅失败: " << topic << "\n";
-        }
-    });
-    
-    client.set_publish_callback([](const std::string& topic, bool success) {
-        if (success) {
-            std::cout << "✓ 发布成功: " << topic << "\n";
-        } else {
-            std::cout << "✗ 发布失败: " << topic << "\n";
-        }
-    });
-
-    client.set_message_callback(msg_handle);
-    
-    // 启用自动重连
-    client.set_auto_reconnect(true, std::chrono::seconds(5), 10);
-    
-    // 连接到MQTT代理
-    std::cout << "正在连接到MQTT代理...\n";
-    if (!client.connect(conn_opts)) {
-        std::cerr << "连接失败: " << client.get_last_error() << "\n";
-        return 1;
-    }
-    
-    // 等待连接完成
-    if (!client.wait_for_connection(std::chrono::seconds(10))) {
-        std::cerr << "连接超时\n";
-        return 1;
-    }
-    
-    // 订阅主题
-    std::cout << "\n正在订阅主题...\n";
-    MQTTClientV2::SubscribeOptions sub_opts;
-    sub_opts.qos = 1;
-    
-    if (!client.subscribe(MSG(CMD), sub_opts)) {
-        std::cerr << "订阅失败: " << client.get_last_error() << "\n";
-    }
-
-    if (!client.subscribe(MSG(HEARTBEAT), sub_opts)) {
-        std::cerr << "订阅失败: " << client.get_last_error() << "\n";
-    }
-    
-    
-    std::vector<std::string> topics = client.get_subscribed_topics();
-    for(int i = 0;i < topics.size();i++){
-        std::cout << "订阅主题: " << topics[i] << "\n";
-    }
-    
-    // 发布消息
-    
+    //初始化电价
+    init_price_table(table);
 
     
+    //初始化网路
+    if(init_network(client)){
+        
+        set_device_status(DEVICE_STATUS_ONLINE);
+        // 订阅主题
+        std::cout << "\n正在订阅主题...\n";
+        MQTTClientV2::SubscribeOptions sub_opts;
+        sub_opts.qos = 1;
+        
+        if (!client.subscribe(MSG(CMD), sub_opts)) {
+            std::cerr << "订阅失败: " << client.get_last_error() << "\n";
+        }
+
+        if (!client.subscribe(MSG(HEARTBEAT), sub_opts)) {
+            std::cerr << "订阅失败: " << client.get_last_error() << "\n";
+        }
+        
+        std::vector<std::string> topics = client.get_subscribed_topics();
+        for(int i = 0;i < topics.size();i++){
+            std::cout << "订阅主题: " << topics[i] << "\n";
+        }
+
+    }else{
+        clear_device_status(DEVICE_STATUS_ONLINE);
+    }
     
     // 主循环
     int counter = 0;
@@ -228,17 +195,17 @@ int main() {
     while (running) {
         // 打印设备状态
         print_device_status();
-        
-        // 网络同步
-        client.sync();
 
-        // 序列化发送MQTT消息
-        send_mqtt_msg();
+        if(get_device_status(DEVICE_STATUS_ONLINE)){
+            // 网络同步
+            client.sync();
+            // 序列化发送MQTT消息
+            send_mqtt_msg();
+            // 每10秒发布一次心跳消息
+            if (counter % 10 == 0) {
+                send_heatbeat();
+            }
 
-        
-        // 每10秒发布一次心跳消息
-        if (counter % 10 == 0) {
-            send_heatbeat();
         }
         
         // 检查错误
@@ -316,6 +283,11 @@ void init_log_system() {
 void msg_handle(const std::string& topic, const std::string& payload, uint8_t qos, bool retain) {
 
     log_i("receive:%s content:%s Qos:%d",topic.c_str(),payload.c_str(),static_cast<int>(qos));
+
+    if(topic == MSG(HEARTBEAT)){
+        return ;
+    }
+
     try{
         nlohmann::json content = nlohmann::json::parse(payload);
         int cmd = content["cmd"];
@@ -330,6 +302,12 @@ void msg_handle(const std::string& topic, const std::string& payload, uint8_t qo
         if(topic == MSG(CMD)){
             if(cmd == DEVICE_CMD_START){
                 log_i("start");
+
+                if(!check_start_condition()){
+                    log_e("check_start_condition failed");
+                    send_result(cmd,RESULT_FAIL,"self check failed");
+                    return;
+                }
                 if(device->SelfCheck() == 0){
                     device->Start();
                     set_device_status(DEVICE_STATUS_START);
@@ -370,3 +348,47 @@ void init_price_table(PriceTable &table){
         set_device_status(DEVICE_STATUS_ERROR_CONFIG);
     }
 }
+
+bool init_network(MQTTClientV2 & client){
+        MQTTClientV2::ConnectionOptions conn_opts;
+        conn_opts.client_id = "cpp14_client_" + std::to_string(getpid());
+        conn_opts.clean_session = true;
+        conn_opts.keep_alive = 60;
+        conn_opts.connect_timeout = 1;
+        
+        // 设置回调函数
+        client.set_connect_callback([](bool success, const std::string& reason) {
+            if (success) {
+                log_e("mqtt 连接成功");
+                clear_device_status(DEVICE_STATUS_ONLINE);
+            } else {
+                log_e("mqtt 连接失败");
+                set_device_status(DEVICE_STATUS_ONLINE);
+            }
+        });
+        
+        client.set_disconnect_callback([](const std::string& reason) {std::cout << "⚠ 连接断开: " << reason << "\n";});
+        client.set_error_callback([](const std::string& error) {std::cout << "❌ 错误: " << error << "\n";});
+        client.set_subscribe_callback([](const std::string& topic, bool success, uint8_t qos) {} );
+        client.set_publish_callback([](const std::string& topic, bool success) {});
+        client.set_message_callback(msg_handle);
+        
+        // 连接到MQTT代理
+        std::cout << "正在连接到MQTT代理...\n";
+        if (!client.connect(conn_opts)) {
+            std::cerr << "连接失败: " << client.get_last_error() << "\n";
+            return false;
+        }
+        
+        // 等待连接完成
+        if (!client.wait_for_connection(std::chrono::seconds(10))) {
+            std::cerr << "连接超时\n";
+            return false;
+        }
+
+        // 启用自动重连
+        client.set_auto_reconnect(true, std::chrono::seconds(5), 10);
+        
+        return true;
+
+    }
