@@ -17,7 +17,7 @@ public:
 
     // 传入unix时间戳，返回当前电价（price+service_fee）
     double get_price(time_t unix_time) const;
-
+    double get_price(int hour) const;
     // 打印所有时间段电价及服务费
     void print_all() const;
 

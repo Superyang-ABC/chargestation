@@ -49,6 +49,16 @@ double PriceTable::get_price(time_t unix_time) const {
     return other_price_ + other_service_fee_;
 }
 
+double PriceTable::get_price(int hour) const {
+    int minutes = hour * 60;
+    for (const auto& p : price_list_) {
+
+        if (p.start_minutes <= minutes && minutes < p.end_minutes) {
+            return p.price + p.service_fee;
+        }
+    }
+}
+
 void PriceTable::print_all() const {
     std::cout << "充电桩价格表:" << std::endl;
     for (const auto& p : price_list_) {

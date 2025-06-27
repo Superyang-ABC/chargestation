@@ -1,4 +1,5 @@
 #include "tools/mqtt/mqtt_client_v2.hpp"
+#include "tools/timer/timer.hpp"
 #include <iostream>
 #include <chrono>
 #include <thread>
@@ -65,19 +66,19 @@ enum DEVICE_STATUS_CODE{
     DEVICE_STATUS_SELF_CHECK_FAIL = 2,
     DEVICE_STATUS_START = 3,
     DEVICE_STATUS_STOP = 4,
-    DEVICE_STATUS_PAUSE = 5,
-    DEVICE_STATUS_ONLINE = 6, //在线
-    DEVICE_STATUS_BUSY = 7, //忙碌
-    DEVICE_STATUS_FORRBIDDEN = 8, //禁止所有充电
-     DEVICE_STATUS_FORRBIDDEN_REMOTE = 9, //禁止远程充电
-    DEVICE_STATUS_FORRBIDDEN_COMMERCIAL = 10, //禁止商用充电
+    DEVICE_STATUS_ONLINE = 5, //在线
+    DEVICE_STATUS_BUSY = 6, //忙碌
+    DEVICE_STATUS_FORRBIDDEN = 7, //禁止所有充电
+     DEVICE_STATUS_FORRBIDDEN_REMOTE = 8, //禁止远程充电
+    DEVICE_STATUS_FORRBIDDEN_COMMERCIAL = 9, //禁止商用充电
 };
 
 enum DEVICE_CMD{
     DEVICE_CMD_REMOTE_START = 1,
     DEVICE_CMD_COMMERCIAL_START = 2,
     DEVICE_CMD_STOP = 3,
-    DEVICE_CMD_PAUSE = 4
+    DEVICE_CMD_PAUSE = 4,
+    DEVICE_CMD_CHARGE_INFO = 5, //获取充电信息
 };
 
 enum RESULT_CODE{
@@ -92,18 +93,76 @@ enum START_TYPE{
     START_TYPE_COMMERCIAL = 3, //商用启动
 };
 
+
+
 struct ChargeInfo{
     int start_type; //启动类型
     string describe; //描述
-    uint64_t start_time; //开始时间
-    uint64_t end_time; //结束时间
+    string start_time; //开始时间
+    string end_time; //结束时间
     float total; //价格
-};
+    float all_energy; //总电量
+    std::vector<float> period_stats; // 各时间段充电统计
+
+    ChargeInfo(): period_stats(24, 0.0f){
+        start_type = -1;
+        describe = "";
+        start_time = "";
+        end_time = "";
+        total = 0;
+        all_energy = 0;
+    }
+    ChargeInfo(int start_type,string describe,string start_time,string end_time) : period_stats(24, 0.0f){
+        this->start_type = start_type;
+        this->describe = describe;
+        this->start_time = start_time;
+        this->end_time = end_time;
+        this->total = 0;
+        this->all_energy = 0;
+    }
+
+    void clear(){
+        start_type = -1;
+        describe = "";
+        start_time = "";
+        end_time = "";
+        total = 0;
+        all_energy = 0;
+        //初始化电量统计时间段
+        for(int i = 0;i < period_stats.size();i++){
+            period_stats[i] = 0;
+        }
+    }
+
+    float get_all_energy(){
+        float total = 0;
+        for(int i = 0;i < period_stats.size();i++){
+            total = total + period_stats[i];
+        }
+        all_energy = total;
+        return total;
+    }
+    
+    void add_period_stats(int hour,float energy){
+        period_stats[hour] = period_stats[hour] + energy;
+    }
+    void add_period_stats(time_t unix_time,float energy){
+        int hour = unix_time / 3600 % 24;
+        int minute = (unix_time % 3600) / 60;
+        int second = unix_time % 60;
+        period_stats[hour] = period_stats[hour] + energy;
+    }
+
+    NLOHMANN_DEFINE_TYPE_INTRUSIVE(ChargeInfo,start_type, describe, start_time, end_time, total,all_energy,period_stats)
+} charge_info;
 
 static int current_start_type = -1; //当前启动类型
 static std::queue<MQTT_MSG> mqtt_msg_queue;
 static std::mutex mqtt_msg_queue_mutex;
 static std::mutex device_mutex;
+static std::mutex charge_info_mutex;
+static std::unique_ptr<Timer> timer;
+
 uint64_t DEVICE_STATUS= 0;
 // 创建MQTT客户端
 MQTTClientV2 client(MQTT_SERVER, MQTT_PORT);
@@ -116,10 +175,17 @@ static bool running = true;
 void init_price_table(PriceTable &table);
 void init_log_system();
 bool init_network(MQTTClientV2 & client);
+void init_timer();
 
-
+void send_result(int cmd,int result,string describe = "" );
 void send_heatbeat();
-void send_result(int cmd,int result,string describe);
+void send_charge_info(const ChargeInfo &charge_info);
+bool check_start_condition(int type);
+void msg_handle(const std::string& topic, const std::string& payload, uint8_t qos, bool retain);
+
+void charge_timer_callback();
+
+
 
 void set_device_status(uint64_t pos) { 
     std::lock_guard<std::mutex> lck(device_mutex); 
@@ -137,23 +203,19 @@ void print_device_status() {
     log_w("设备状态: %d",DEVICE_STATUS);
     }
 
-void send_result(int cmd,int result,string describe = "" );
-bool check_start_condition(int type);
-void msg_handle(const std::string& topic, const std::string& payload, uint8_t qos, bool retain);
-
 bool check_start_condition(int type){
-    bool result = false;
 
     if(get_device_status(DEVICE_STATUS_FORRBIDDEN)){
         log_e("设备禁止充电");
-        return result;
+        return false;
     }
     if(get_device_status(DEVICE_STATUS_BUSY)){
         log_e("设备忙碌中");
-        return result;
+        return false;
     }
     // 设置设备状态为忙碌
     set_device_status(DEVICE_STATUS_BUSY);
+    bool result = true;
     // 检查设备状态
     switch(type){
         case START_TYPE_NFC:
@@ -183,7 +245,7 @@ bool check_start_condition(int type){
         return false;
     }
 
-    if(!device->SelfCheck()){
+    if(device->SelfCheck() > 0){
         log_e("设备自检失败");
         clear_device_status(DEVICE_STATUS_BUSY);
         set_device_status(DEVICE_STATUS_SELF_CHECK_FAIL);
@@ -219,7 +281,23 @@ void signal_handler(int signal) {
     running = false;
 }
 
-
+void charge_timer_callback(){
+    float power = device->GetPower();//(kw)
+    float total = 0;
+    time_t now = time(nullptr);
+    std::lock_guard<std::mutex> lock(charge_info_mutex);
+    charge_info.add_period_stats(now,power * (1.0 / 3600));
+    if(charge_info.start_type == START_TYPE_COMMERCIAL){
+        for(int i = 0;i < charge_info.period_stats.size();i++){
+            total += charge_info.period_stats[i] * table.get_price(i);  
+        }
+    }
+    charge_info.all_energy =  charge_info.get_all_energy();
+    charge_info.total = total;
+    nlohmann::json json_charge_info = charge_info;
+    send_charge_info(charge_info);
+   
+}
 int main() {
     // 设置信号处理
     signal(SIGINT, signal_handler);
@@ -228,10 +306,14 @@ int main() {
     //初始化日志系统
     init_log_system();
 
+    //初始化定时器
+    init_timer();
+
     //初始化电价
     init_price_table(table);
 
     
+
     //初始化网路
     if(init_network(client)){
         
@@ -294,39 +376,6 @@ int main() {
     return 0;
 } 
 
-void send_heatbeat(){
-    MQTTClientV2::PublishOptions pub_opts;
-    pub_opts.qos = 1;
-    pub_opts.retain = false;
-    nlohmann::json content;
-    content["status"] = DEVICE_STATUS;
-    content["timestamp"] = std::chrono::duration_cast<std::chrono::seconds>(
-                                std::chrono::system_clock::now().time_since_epoch()).count();
-    content["device_id"] = DEVICE_ID;
-    content["describe"] = "heartbeat";
-    std::string heartbeat = content.dump();
-    //push_mqtt_msg(MQTT_MSG(MSG(HEARTBEAT), content, pub_opts.qos, pub_opts.retain));
-    client.publish(MSG(HEARTBEAT), heartbeat, pub_opts);
-}
-
-void send_result(int cmd,int result,string describe ){
-
-    MQTTClientV2::PublishOptions pub_opts;
-    pub_opts.qos = 1;
-    pub_opts.retain = false;
-    nlohmann::json content;
-    content["cmd"] = cmd;
-    content["result"] = result;
-    content["timestamp"] = std::chrono::duration_cast<std::chrono::seconds>(
-                                std::chrono::system_clock::now().time_since_epoch()).count();
-    content["device_id"] = DEVICE_ID;
-    content["describe"] = describe;
-    push_mqtt_msg(MQTT_MSG(MSG(STATUS), content, pub_opts.qos, pub_opts.retain));
-    //client.publish(MSG(STATUS), content.dump(), pub_opts);
-    log_i("send:%s  content:%s",string(MSG(STATUS)).c_str(),content.dump().c_str());
-}
-
-
 void init_log_system() {
     /* close printf buffer */
     setbuf(stdout, NULL);
@@ -369,40 +418,52 @@ void msg_handle(const std::string& topic, const std::string& payload, uint8_t qo
             return;
         }
         if(topic == MSG(CMD)){
-            if(cmd == START_TYPE_REMOTE){
+            if(cmd == DEVICE_CMD_REMOTE_START){
                 log_i("start");
                 if(!check_start_condition(START_TYPE_REMOTE)){
                     log_e("check_start_condition failed");
                     send_result(cmd,RESULT_FAIL,"self check failed");
                     return;
                 }
+                else{
+
+                    std::lock_guard<std::mutex> lock(charge_info_mutex);
+                    charge_info.clear();
+                    charge_info.start_time = "";
+                    charge_info.start_type = START_TYPE_REMOTE;
+                    charge_info.describe = "remote start";
+                    timer->restart();
+                    
+                }
                 
             }
-            if(cmd == START_TYPE_COMMERCIAL){
+            if(cmd == DEVICE_CMD_COMMERCIAL_START){
                 log_i("start");
+                
                 if(!check_start_condition(START_TYPE_COMMERCIAL)){
                     log_e("check_start_condition failed");
                     send_result(cmd,RESULT_FAIL,"self check failed");
                     return;
                 }
+                else{
+                    std::lock_guard<std::mutex> lock(charge_info_mutex);
+                    charge_info.clear();
+                    charge_info.start_time = "";
+                    charge_info.start_type = START_TYPE_COMMERCIAL;
+                    charge_info.describe = "commercial start";
+                    timer->restart();
+                }
             }
             else if(cmd == DEVICE_CMD_STOP){
                 log_i("stop");
-               
+                timer->stop();
                 set_device_status(DEVICE_STATUS_STOP);
                 clear_device_status(DEVICE_STATUS_START);
-                clear_device_status(DEVICE_STATUS_PAUSE);
+                clear_device_status(DEVICE_STATUS_BUSY);
                 device->Stop();
                 send_result(cmd,RESULT_OK);
 
-            }else if(cmd == DEVICE_CMD_PAUSE){
-                log_i("pause");
-                set_device_status(DEVICE_STATUS_PAUSE);
-                clear_device_status(DEVICE_STATUS_START);
-                clear_device_status(DEVICE_STATUS_STOP);
-                device->Pause();
-                send_result(cmd,RESULT_OK);
-            }   
+            } 
         }
 
     }catch(const std::exception& e){
@@ -463,3 +524,72 @@ bool init_network(MQTTClientV2 & client){
 
     }
 
+
+
+void init_timer(){
+
+    // 创建定时器
+    timer = std::make_unique<Timer>();
+    
+    // 配置定时器参数
+    timer->setParameters(
+        std::chrono::milliseconds(1000),                                // 间隔1000ms
+        Timer::Mode::LOOP,                // 重复
+        charge_timer_callback, // 回调函数
+        -1                                   // 重复次数
+    );
+    // 启动定时器
+    log_i("init timer success");
+
+}
+
+
+
+void send_heatbeat(){
+    MQTTClientV2::PublishOptions pub_opts;
+    pub_opts.qos = 1;
+    pub_opts.retain = false;
+    nlohmann::json content;
+    content["status"] = DEVICE_STATUS;
+    content["timestamp"] = std::chrono::duration_cast<std::chrono::seconds>(
+                                std::chrono::system_clock::now().time_since_epoch()).count();
+    content["device_id"] = DEVICE_ID;
+    content["describe"] = "heartbeat";
+    std::string heartbeat = content.dump();
+    //push_mqtt_msg(MQTT_MSG(MSG(HEARTBEAT), content, pub_opts.qos, pub_opts.retain));
+    client.publish(MSG(HEARTBEAT), heartbeat, pub_opts);
+}
+
+void send_result(int cmd,int result,string describe ){
+
+    MQTTClientV2::PublishOptions pub_opts;
+    pub_opts.qos = 1;
+    pub_opts.retain = false;
+    nlohmann::json content;
+    content["cmd"] = cmd;
+    content["result"] = result;
+    content["timestamp"] = std::chrono::duration_cast<std::chrono::seconds>(
+                                std::chrono::system_clock::now().time_since_epoch()).count();
+    content["device_id"] = DEVICE_ID;
+    content["describe"] = describe;
+    push_mqtt_msg(MQTT_MSG(MSG(STATUS), content, pub_opts.qos, pub_opts.retain));
+    //client.publish(MSG(STATUS), content.dump(), pub_opts);
+    log_i("send:%s  content:%s",string(MSG(STATUS)).c_str(),content.dump().c_str());
+}
+void send_charge_info(const ChargeInfo &charge_info){
+    MQTTClientV2::PublishOptions pub_opts;
+    pub_opts.qos = 1;
+    pub_opts.retain = false;
+    nlohmann::json content;
+    content["cmd"] = DEVICE_CMD_CHARGE_INFO;
+    content["result"] = RESULT_OK;
+    content["timestamp"] = std::chrono::duration_cast<std::chrono::seconds>(
+                                std::chrono::system_clock::now().time_since_epoch()).count();
+    content["device_id"] = DEVICE_ID;
+    content["describe"] = "charge info";
+    nlohmann::json charge_info_json = charge_info;
+    content["charge_info"] = charge_info_json;
+    push_mqtt_msg(MQTT_MSG(MSG(STATUS), content, pub_opts.qos, pub_opts.retain));
+    //client.publish(MSG(STATUS), content.dump(), pub_opts);
+    log_i("send:%s  content:%s",string(MSG(STATUS)).c_str(),content.dump().c_str());
+}

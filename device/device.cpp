@@ -26,7 +26,7 @@ int Device::SelfCheck()
 
 float Device::GetPower()
 {
-    return 0.0f;
+    return 0.01f;
 }
 
 std::string Device::GetDeviceId()
